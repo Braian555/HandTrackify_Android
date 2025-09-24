@@ -1,11 +1,18 @@
 package com.gesturecontrol.handtrackify.vision
 
+import com.gesturecontrol.handtrackify.models.MouseGestureHandler
+import com.gesturecontrol.handtrackify.models.QuickActionHandler
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import kotlin.math.sqrt
 
+/**
+ * Classe principal para reconhecimento de gestos.
+ * Atua como um orquestrador que deteta poses básicas e controla a ativação
+ * de módulos de gestos complexos, como o MouseGestureHandler e o QuickActionHandler.
+ */
 class GestureRecognizer {
-    // Enum para facilitar a referência aos landmarks dos dedos
+
     private enum class Finger(val tip: Int, val mcp: Int, val dip: Int? = null, val fingerName: String) {
         THUMB(4, 2, 3, "Polegar"),
         INDEX(8, 5, 7, "Indicador"),
@@ -14,117 +21,100 @@ class GestureRecognizer {
         PINKY(20, 17, 19, "Mínimo")
     }
 
-    // Enum para gerir o estado complexo dos gestos de clique
-    private enum class ClickState {
-        IDLE,               // Estado neutro
-        PRIMED,             // "Preparado", pronto para iniciar um clique
-        INDEX_DOWN,         // Dedo indicador para baixo, aguardando para clique direito
-        MIDDLE_DOWN,        // Dedo médio para baixo, aguardando para clique esquerdo
-        RIGHT_CLICKED,      // Clique direito acionado
-        LEFT_CLICKED        // Clique esquerdo acionado
+    private enum class OperatingMode {
+        IDLE,
+        AWAITING_MODE_SELECTION,
+        MOUSE_MODE,
+        QUICK_ACTION_MODE // Novo modo para ações rápidas
     }
 
-    // --- Variáveis de Estado ---
-    private var lastDetectedPose: String = "Nenhum"
-    private var fingerDownStartTime: Long = 0L // para medir a duração do clique
-    private var clickState: ClickState = ClickState.IDLE
-    private var clickResetTime: Long = 0L
+    private val mouseGestureHandler = MouseGestureHandler()
+    private val quickActionHandler = QuickActionHandler() // Novo módulo
 
-    // --- Constantes de Tempo ---
-    private val clickMaxTimeMs = 1400L     // 1.4 segundos como tempo máximo para um clique direito válido
-    private val leftClickMaxTimeMs = 1000L // 1.0 segundo como tempo máximo para um clique esquerdo válido
-    private val clickResetDelayMs = 500L   // 0.5 segundos para o estado de clique ser visível
+    private var operatingMode = OperatingMode.IDLE
+    private var poseStartTime: Long = 0L
+    private val modeActivationDelayMs = 1000L // Tempo de espera para ativar o modo rato (1 segundo)
 
     fun recognize(result: HandLandmarkerResult): String {
-        // Se a mão não for detetada, reinicia tudo.
         if (result.landmarks().isEmpty()) {
-            resetState()
+            resetAllModes()
             return "Nenhum"
         }
 
         val landmarks = result.landmarks()[0]
         val currentPose = detectPose(landmarks)
-
-        updateClickState(currentPose, landmarks)
-
-        lastDetectedPose = currentPose
-        return getActionString(currentPose, landmarks)
-    }
-
-    private fun updateClickState(currentPose: String, landmarks: List<NormalizedLandmark>) {
         val currentTime = System.currentTimeMillis()
 
-        // Lógica de expiração para os estados de clique
-        if ((clickState == ClickState.RIGHT_CLICKED || clickState == ClickState.LEFT_CLICKED) && currentTime > clickResetTime) {
-            clickState = if (currentPose == "PAZ_E_AMOR") ClickState.PRIMED else ClickState.IDLE
+        // --- Orquestrador Principal ---
+        when (operatingMode) {
+            OperatingMode.IDLE -> {
+                when (currentPose) {
+                    "PAZ_E_AMOR" -> {
+                        operatingMode = OperatingMode.AWAITING_MODE_SELECTION
+                        poseStartTime = currentTime
+                    }
+                    "QUICK_ACTION_PRIMED_POSE" -> {
+                        // Ativa o modo de ações rápidas imediatamente
+                        operatingMode = OperatingMode.QUICK_ACTION_MODE
+                    }
+                }
+            }
+            OperatingMode.AWAITING_MODE_SELECTION -> {
+                when (currentPose) {
+                    "PAZ_E_AMOR" -> {
+                        if (currentTime - poseStartTime > modeActivationDelayMs) {
+                            operatingMode = OperatingMode.MOUSE_MODE
+                        }
+                    }
+                    "QUICK_ACTION_PRIMED_POSE" -> {
+                        // Se o polegar for levantado durante a espera, ativa o modo de ações rápidas.
+                        operatingMode = OperatingMode.QUICK_ACTION_MODE
+                    }
+                    else -> {
+                        resetAllModes()
+                    }
+                }
+            }
+            OperatingMode.MOUSE_MODE -> {
+                mouseGestureHandler.process(currentPose)
+                if (mouseGestureHandler.getAction() == null) {
+                    resetAllModes()
+                }
+            }
+            OperatingMode.QUICK_ACTION_MODE -> {
+                quickActionHandler.process(currentPose)
+                if (quickActionHandler.getAction() == null) {
+                    resetAllModes()
+                }
+            }
         }
 
-        when (clickState) {
-            ClickState.IDLE -> {
-                if (currentPose == "PAZ_E_AMOR") clickState = ClickState.PRIMED
-            }
-            ClickState.PRIMED -> {
-                when (currentPose) {
-                    "RIGHT_CLICK_TRIGGER_POSE" -> {
-                        clickState = ClickState.INDEX_DOWN
-                        fingerDownStartTime = currentTime
-                    }
-                    "LEFT_CLICK_TRIGGER_POSE" -> {
-                        clickState = ClickState.MIDDLE_DOWN
-                        fingerDownStartTime = currentTime
-                    }
-                    "PAZ_E_AMOR" -> { /* Mantém-se preparado */ }
-                    else -> clickState = ClickState.IDLE
-                }
-            }
-            ClickState.INDEX_DOWN -> {
-                when (currentPose) {
-                    "RIGHT_CLICK_TRIGGER_POSE" -> { /* Aguarda o dedo levantar */ }
-                    "PAZ_E_AMOR" -> {
-                        if (currentTime - fingerDownStartTime < clickMaxTimeMs) {
-                            clickState = ClickState.RIGHT_CLICKED
-                            clickResetTime = currentTime + clickResetDelayMs
-                        } else {
-                            clickState = ClickState.PRIMED
-                        }
-                    }
-                    else -> clickState = ClickState.IDLE
-                }
-            }
-            ClickState.MIDDLE_DOWN -> {
-                when (currentPose) {
-                    "PAZ_E_AMOR" -> {
-                        if (currentTime - fingerDownStartTime < leftClickMaxTimeMs) {
-                            clickState = ClickState.LEFT_CLICKED
-                            clickResetTime = currentTime + clickResetDelayMs
-                        } else {
-                            clickState = ClickState.PRIMED
-                        }
-                    }
-                    "LEFT_CLICK_TRIGGER_POSE" -> { /* Aguardando */ }
-                    else -> clickState = ClickState.IDLE
-                }
-            }
-            ClickState.RIGHT_CLICKED, ClickState.LEFT_CLICKED -> { /* Lógica de timeout tratada no início */ }
+        // --- Retorno da Ação ---
+        return when (operatingMode) {
+            OperatingMode.MOUSE_MODE -> mouseGestureHandler.getAction() ?: "Nenhum"
+            OperatingMode.QUICK_ACTION_MODE -> quickActionHandler.getAction() ?: "Nenhum"
+            OperatingMode.AWAITING_MODE_SELECTION -> "Aguardando..."
+            OperatingMode.IDLE -> getIdleActionString(currentPose, landmarks)
         }
     }
 
-    private fun getActionString(currentPose: String, landmarks: List<NormalizedLandmark>): String {
-        return when (clickState) {
-            ClickState.RIGHT_CLICKED -> "Clique Direito"
-            ClickState.LEFT_CLICKED -> "Clique Esquerdo"
-            ClickState.PRIMED, ClickState.INDEX_DOWN, ClickState.MIDDLE_DOWN -> "Preparado"
-            ClickState.IDLE -> when (currentPose) {
-                "PUNHO" -> "Punho Fechado"
-                "THUMB_UP" -> "Polegar Levantado"
-                "OUTRO" -> {
-                    val fingersUp = getFingersUp(landmarks)
-                    if (fingersUp.isNotEmpty()) "Dedo(s) levantado(s): ${fingersUp.joinToString(", ")}"
-                    else "Nenhum"
-                }
-                else -> "Nenhum"
+    private fun getIdleActionString(currentPose: String, landmarks: List<NormalizedLandmark>): String {
+        return when (currentPose) {
+            "PUNHO" -> "Punho Fechado"
+            "THUMB_UP" -> "DEDAO"
+            "OUTRO" -> {
+                val fingersUp = getFingersUp(landmarks)
+                if (fingersUp.isNotEmpty()) "Dedo(s) levantado(s): ${fingersUp.joinToString(", ")}"
+                else "Nenhum"
             }
+            else -> "Nenhum"
         }
+    }
+
+    private fun resetAllModes() {
+        operatingMode = OperatingMode.IDLE
+        mouseGestureHandler.reset()
+        quickActionHandler.reset()
     }
 
     private fun detectPose(landmarks: List<NormalizedLandmark>): String {
@@ -134,12 +124,22 @@ class GestureRecognizer {
         val isPinkyUp = isFingerUp(landmarks, Finger.PINKY)
         val isThumbUp = isThumbUp(landmarks)
 
-        if (isFist(landmarks)) return "PUNHO"
+        // Poses para o Módulo de Ações Rápidas
+        if (isIndexUp && isMiddleUp && !isRingUp && !isPinkyUp && isThumbUp) return "QUICK_ACTION_PRIMED_POSE"
+        if (isThumbUp && isMiddleUp && !isRingUp && !isPinkyUp && !isIndexUp) return "QUICK_ACTION_INDEX_DOWN_POSE"
+        if (isThumbUp && isIndexUp && !isRingUp && !isPinkyUp && !isMiddleUp) return "QUICK_ACTION_MIDDLE_DOWN_POSE"
+
+        // Poses para o Módulo de Rato
         if (isIndexUp && isMiddleUp && !isRingUp && !isPinkyUp && !isThumbUp) return "PAZ_E_AMOR"
         if (!isIndexUp && isMiddleUp && !isRingUp && !isPinkyUp && !isThumbUp) return "RIGHT_CLICK_TRIGGER_POSE"
         if (isIndexUp && !isMiddleUp && !isRingUp && !isPinkyUp && !isThumbUp) return "LEFT_CLICK_TRIGGER_POSE"
+
+        // Gestos básicos do modo IDLE
+        if (isFist(landmarks)) return "PUNHO"
         if (isThumbUp && !isIndexUp && !isMiddleUp && !isRingUp && !isPinkyUp) return "THUMB_UP"
+
         if (isIndexUp || isMiddleUp || isRingUp || isPinkyUp || isThumbUp) return "OUTRO"
+
         return "Nenhum"
     }
 
@@ -177,17 +177,9 @@ class GestureRecognizer {
         return fourFingersDown && !isThumbUp(landmarks)
     }
 
-    private fun resetState() {
-        lastDetectedPose = "Nenhum"
-        fingerDownStartTime = 0L
-        clickState = ClickState.IDLE
-        clickResetTime = 0L
-    }
-
     private fun calculateDistance(p1: NormalizedLandmark, p2: NormalizedLandmark): Float {
         val dx = p1.x() - p2.x()
         val dy = p1.y() - p2.y()
         return sqrt((dx * dx + dy * dy).toDouble()).toFloat()
     }
 }
-
