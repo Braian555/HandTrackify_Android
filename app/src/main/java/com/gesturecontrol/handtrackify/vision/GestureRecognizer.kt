@@ -18,33 +18,26 @@ class GestureRecognizer {
     private enum class ClickState {
         IDLE,               // Estado neutro
         PRIMED,             // "Preparado", pronto para iniciar um clique
-        INDEX_DOWN,         // Dedo indicador para baixo, aguardando para clique/segurar direito
+        INDEX_DOWN,         // Dedo indicador para baixo, aguardando para clique direito
         MIDDLE_DOWN,        // Dedo médio para baixo, aguardando para clique esquerdo
-        RIGHT_HOLDING,      // "Segurando" com o dedo indicador (Estado de Bloqueio)
         RIGHT_CLICKED,      // Clique direito acionado
         LEFT_CLICKED        // Clique esquerdo acionado
     }
 
     // --- Variáveis de Estado ---
     private var lastDetectedPose: String = "Nenhum"
-    private var fingerDownStartTime: Long = 0L // para medir a duração do clique/segurar
+    private var fingerDownStartTime: Long = 0L // para medir a duração do clique
     private var clickState: ClickState = ClickState.IDLE
     private var clickResetTime: Long = 0L
 
     // --- Constantes de Tempo ---
-    private val HOLD_DELAY_MS = 1500L         // 1.5 segundos para acionar "Segurando"
-    private val CLICK_MAX_TIME_MS = 1400L     // 1.4 segundos como tempo máximo para um clique direito válido
-    private val LEFT_CLICK_MAX_TIME_MS = 1000L // 1.0 segundo como tempo máximo para um clique esquerdo válido
-    private val CLICK_RESET_DELAY_MS = 500L   // 0.5 segundos para o estado de clique ser visível
+    private val clickMaxTimeMs = 1400L     // 1.4 segundos como tempo máximo para um clique direito válido
+    private val leftClickMaxTimeMs = 1000L // 1.0 segundo como tempo máximo para um clique esquerdo válido
+    private val clickResetDelayMs = 500L   // 0.5 segundos para o estado de clique ser visível
 
     fun recognize(result: HandLandmarkerResult): String {
-        // Se a mão não for detetada
+        // Se a mão não for detetada, reinicia tudo.
         if (result.landmarks().isEmpty()) {
-            // Se estivermos no estado de bloqueio "Segurando", mantém o estado.
-            if (clickState == ClickState.RIGHT_HOLDING) {
-                return "Segurando Direito"
-            }
-            // Caso contrário, reinicia tudo.
             resetState()
             return "Nenhum"
         }
@@ -52,7 +45,6 @@ class GestureRecognizer {
         val landmarks = result.landmarks()[0]
         val currentPose = detectPose(landmarks)
 
-        // A máquina de estados agora precisa dos landmarks para a condição de saída
         updateClickState(currentPose, landmarks)
 
         lastDetectedPose = currentPose
@@ -87,15 +79,11 @@ class GestureRecognizer {
             }
             ClickState.INDEX_DOWN -> {
                 when (currentPose) {
-                    "RIGHT_CLICK_TRIGGER_POSE" -> {
-                        if (currentTime - fingerDownStartTime > HOLD_DELAY_MS) {
-                            clickState = ClickState.RIGHT_HOLDING
-                        }
-                    }
+                    "RIGHT_CLICK_TRIGGER_POSE" -> { /* Aguarda o dedo levantar */ }
                     "PAZ_E_AMOR" -> {
-                        if (currentTime - fingerDownStartTime < CLICK_MAX_TIME_MS) {
+                        if (currentTime - fingerDownStartTime < clickMaxTimeMs) {
                             clickState = ClickState.RIGHT_CLICKED
-                            clickResetTime = currentTime + CLICK_RESET_DELAY_MS
+                            clickResetTime = currentTime + clickResetDelayMs
                         } else {
                             clickState = ClickState.PRIMED
                         }
@@ -106,9 +94,9 @@ class GestureRecognizer {
             ClickState.MIDDLE_DOWN -> {
                 when (currentPose) {
                     "PAZ_E_AMOR" -> {
-                        if (currentTime - fingerDownStartTime < LEFT_CLICK_MAX_TIME_MS) {
+                        if (currentTime - fingerDownStartTime < leftClickMaxTimeMs) {
                             clickState = ClickState.LEFT_CLICKED
-                            clickResetTime = currentTime + CLICK_RESET_DELAY_MS
+                            clickResetTime = currentTime + clickResetDelayMs
                         } else {
                             clickState = ClickState.PRIMED
                         }
@@ -117,20 +105,12 @@ class GestureRecognizer {
                     else -> clickState = ClickState.IDLE
                 }
             }
-            ClickState.RIGHT_HOLDING -> {
-                // A ÚNICA condição de saída é levantar o polegar.
-                if (isThumbUp(landmarks)) {
-                    clickState = ClickState.IDLE // Liberta o bloqueio e reinicia.
-                }
-                // Se o polegar não estiver levantado, o estado permanece bloqueado.
-            }
             ClickState.RIGHT_CLICKED, ClickState.LEFT_CLICKED -> { /* Lógica de timeout tratada no início */ }
         }
     }
 
     private fun getActionString(currentPose: String, landmarks: List<NormalizedLandmark>): String {
         return when (clickState) {
-            ClickState.RIGHT_HOLDING -> "Segurando Direito"
             ClickState.RIGHT_CLICKED -> "Clique Direito"
             ClickState.LEFT_CLICKED -> "Clique Esquerdo"
             ClickState.PRIMED, ClickState.INDEX_DOWN, ClickState.MIDDLE_DOWN -> "Preparado"
