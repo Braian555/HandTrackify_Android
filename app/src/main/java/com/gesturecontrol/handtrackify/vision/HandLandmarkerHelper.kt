@@ -4,7 +4,6 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.os.SystemClock
-import android.util.Log
 import androidx.camera.core.ImageProxy
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.MPImage
@@ -13,6 +12,7 @@ import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
+import java.util.concurrent.atomic.AtomicBoolean
 
 class HandLandmarkerHelper(
     val context: Context,
@@ -20,8 +20,12 @@ class HandLandmarkerHelper(
 ) {
 
     private var handLandmarker: HandLandmarker? = null
-    // Adiciona uma instância do nosso novo reconhecedor de gestos.
     private val gestureRecognizer = GestureRecognizer()
+
+    // SOLUÇÃO PARA A LENTIDÃO: Esta trava (ou "porteiro") é a chave.
+    // Ela garante que não vamos tentar processar um novo frame enquanto o anterior
+    // (potencialmente lento, por não ter mãos) ainda está sendo analisado.
+    private val isProcessing = AtomicBoolean(false)
 
     init {
         setupHandLandmarker()
@@ -51,20 +55,27 @@ class HandLandmarkerHelper(
     }
 
     fun detectLiveStream(imageProxy: ImageProxy) {
-        if (handLandmarker == null) {
+        // AQUI ESTÁ A VERIFICAÇÃO:
+        // O método .getAndSet(true) verifica se o valor é 'false' e, se for, o define como 'true' em uma única operação.
+        // Se o valor já era 'true' (ou seja, estamos ocupados), a condição do 'if' é verdadeira e nós pulamos o frame.
+        if (handLandmarker == null || isProcessing.getAndSet(true)) {
             imageProxy.close()
             return
         }
 
         val frameTime = SystemClock.uptimeMillis()
         val bitmap = imageProxy.toBitmap()
-        imageProxy.close()
 
         val matrix = Matrix().apply {
             postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
             postScale(-1f, 1f, bitmap.width.toFloat(), bitmap.height.toFloat())
         }
-        val rotatedBitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+
+        val rotatedBitmap = Bitmap.createBitmap(
+            bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
+        )
+
+        imageProxy.close()
 
         val mpImage = BitmapImageBuilder(rotatedBitmap).build()
         handLandmarker?.detectAsync(mpImage, frameTime)
@@ -74,8 +85,11 @@ class HandLandmarkerHelper(
         val finishTimeMs = SystemClock.uptimeMillis()
         val inferenceTime = finishTimeMs - result.timestampMs()
 
-        // Usa o reconhecedor para obter o nome do gesto.
-        val gesture = gestureRecognizer.recognize(result)
+        val gesture = if (result.landmarks().isEmpty()) {
+            "Nenhum"
+        } else {
+            gestureRecognizer.recognize(result)
+        }
 
         handLandmarkerListener.onResults(
             ResultBundle(
@@ -83,13 +97,23 @@ class HandLandmarkerHelper(
                 inferenceTime = inferenceTime,
                 inputImageHeight = input.height,
                 inputImageWidth = input.width,
-                gesture = gesture // Adiciona o gesto ao pacote de resultados.
+                gesture = gesture
             )
         )
+
+        // ANÁLISE TERMINADA: Liberamos a trava para o próximo frame poder entrar.
+        isProcessing.set(false)
     }
 
     private fun returnLivestreamError(error: RuntimeException) {
         handLandmarkerListener.onError(error.message ?: "Erro desconhecido")
+        // EM CASO DE ERRO: Também liberamos a trava para não bloquear o app.
+        isProcessing.set(false)
+    }
+
+    fun close() {
+        handLandmarker?.close()
+        handLandmarker = null
     }
 
     interface LandmarkerListener {
@@ -102,7 +126,7 @@ class HandLandmarkerHelper(
         val inferenceTime: Long,
         val inputImageHeight: Int,
         val inputImageWidth: Int,
-        val gesture: String // Novo campo para o gesto.
+        val gesture: String
     )
 
     companion object {
